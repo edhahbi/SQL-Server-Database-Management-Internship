@@ -1,0 +1,451 @@
+# Global defaults.
+global:
+  # If scrape_timeout <= 0, no timeout is set unless Prometheus provides one. The default is 10s.
+  scrape_timeout: 10s
+  # Subtracted from Prometheus' scrape_timeout to give us some headroom and prevent Prometheus from timing out first.
+  scrape_timeout_offset: 500ms
+  # Minimum interval between collector runs: by default (0s) collectors are executed on every scrape.
+  min_interval: 0s
+  # Maximum number of open connections to any one target. Metric queries will run concurrently on multiple connections,
+  # as will concurrent scrapes.
+  max_connections: 3
+  # Maximum number of idle connections to any one target. Unless you use very long collection intervals, this should
+  # always be the same as max_connections.
+  max_idle_connections: 3
+  # Maximum number of maximum amount of time a connection may be reused. Expired connections may be closed lazily before reuse.
+  # If 0, connections are not closed due to a connection's age.
+  max_connection_lifetime: 5m
+  # Interval between database pings. By default (0s) ping every time when call target.ping().
+  ping_interval: 30s
+
+# The target to monitor and the collectors to execute on it.
+target:
+  # Data source name always has a URI schema that matches the driver name. In some cases (e.g. MySQL)
+  # the schema gets dropped or replaced to match the driver expected DSN format.
+  data_source_name: 'sqlserver://sa:ClinisysStage%2412@sqlserver:1433/master?encrypt=disable'
+
+  # Collectors (referenced by name) to execute on the target.
+  # Glob patterns are supported (see <https://pkg.go.dev/path/filepath#Match> for syntax).
+  collectors:
+    - cpu
+    - io
+    - memory
+    - availability
+    - activity
+    - cache
+    - tempdb
+    - waits
+
+# Collectors may be defined inline for simpler deployment.
+collectors:
+  - collector_name: cpu
+    metrics:
+      - metric_name: sqlserver_cpu_utilization_percent
+        type: gauge
+        help: "Current SQL Server CPU utilization percentage."
+        key_labels: []
+        values: [value]
+        query: |
+          SELECT TOP (1)
+              SQLProcessUtilization AS value
+          FROM (
+              SELECT
+                  record.value('(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]', 'int') AS SQLProcessUtilization,
+                  ROW_NUMBER() OVER (ORDER BY timestamp DESC) AS rn
+              FROM (
+                  SELECT
+                      timestamp,
+                      CONVERT(XML, record) AS record
+                  FROM sys.dm_os_ring_buffers
+                  WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
+                    AND record LIKE '%<SystemHealth>%'
+              ) rb
+          ) t
+          WHERE rn = 1;
+
+      - metric_name: sqlserver_runnable_tasks
+        type: gauge
+        help: "Number of runnable tasks waiting on the scheduler."
+        key_labels: []
+        values: [value]
+        query: |
+          SELECT
+              SUM(runnable_tasks_count) AS value
+          FROM sys.dm_os_schedulers
+          WHERE status = 'VISIBLE ONLINE';
+
+      - metric_name: sqlserver_online_schedulers
+        type: gauge
+        help: "Number of online schedulers."
+        key_labels: []
+        values: [value]
+        query: |
+          SELECT
+              COUNT(*) AS value
+          FROM sys.dm_os_schedulers
+          WHERE status = 'VISIBLE ONLINE';
+
+      - metric_name: sqlserver_worker_threads
+        type: gauge
+        help: "Current number of active worker threads."
+        key_labels: []
+        values: [value]
+        query: |
+          SELECT
+              SUM(current_workers_count) AS value
+          FROM sys.dm_os_schedulers
+          WHERE status = 'VISIBLE ONLINE';
+
+  - collector_name: memory
+    metrics:
+      - metric_name: sqlserver_target_memory_bytes
+        type: gauge
+        help: "Target amount of memory SQL Server wants to allocate."
+        values: [value]
+        query: |
+          SELECT
+              cntr_value * 1024 AS value
+          FROM sys.dm_os_performance_counters
+          WHERE object_name LIKE '%Memory Manager%'
+            AND counter_name = 'Target Server Memory (KB)';
+
+      - metric_name: sqlserver_total_memory_bytes
+        type: gauge
+        help: "Total amount of memory currently allocated by SQL Server."
+        values: [value]
+        query: |
+          SELECT
+              cntr_value * 1024 AS value
+          FROM sys.dm_os_performance_counters
+          WHERE object_name LIKE '%Memory Manager%'
+            AND counter_name = 'Total Server Memory (KB)';
+
+  - collector_name: io
+    metrics:
+      - metric_name: sqlserver_database_reads_total
+        type: counter
+        help: "Total number of physical read operations."
+        key_labels:
+          - database_name
+        values:
+          - value
+        query: |
+          SELECT
+              DB_NAME(database_id) AS database_name,
+              SUM(num_of_reads) AS value
+          FROM sys.dm_io_virtual_file_stats(NULL, NULL)
+          GROUP BY database_id;
+
+      - metric_name: sqlserver_database_writes_total
+        type: counter
+        help: "Total number of physical write operations."
+        key_labels:
+          - database_name
+        values:
+          - value
+        query: |
+          SELECT
+              DB_NAME(database_id) AS database_name,
+              SUM(num_of_writes) AS value
+          FROM sys.dm_io_virtual_file_stats(NULL, NULL)
+          GROUP BY database_id;
+
+      - metric_name: sqlserver_database_bytes_read_total
+        type: counter
+        help: "Total Kbytes physically read."
+        key_labels:
+          - database_name
+        values:
+          - value
+        query: |
+          SELECT
+              DB_NAME(database_id) AS database_name,
+              SUM(num_of_bytes_read)/1024 AS value
+          FROM sys.dm_io_virtual_file_stats(NULL, NULL)
+          GROUP BY database_id;
+
+      - metric_name: sqlserver_database_bytes_written_total
+        type: counter
+        help: "Total Kbytes physically written."
+        key_labels:
+          - database_name
+        values:
+          - value
+        query: |
+          SELECT
+              DB_NAME(database_id) AS database_name,
+              SUM(num_of_bytes_written)/1024 AS value
+          FROM sys.dm_io_virtual_file_stats(NULL, NULL)
+          GROUP BY database_id;
+
+      - metric_name: sqlserver_database_read_latency_ms_total
+        type: counter
+        help: "Cumulative read latency in milliseconds."
+        key_labels:
+          - database_name
+        values:
+          - value
+        query: |
+          SELECT
+              DB_NAME(database_id) AS database_name,
+              SUM(io_stall_read_ms) AS value
+          FROM sys.dm_io_virtual_file_stats(NULL, NULL)
+          GROUP BY database_id;
+
+      - metric_name: sqlserver_database_write_latency_ms_total
+        type: counter
+        help: "Cumulative write latency in milliseconds."
+        key_labels:
+          - database_name
+        values:
+          - value
+        query: |
+          SELECT
+              DB_NAME(database_id) AS database_name,
+              SUM(io_stall_write_ms) AS value
+          FROM sys.dm_io_virtual_file_stats(NULL, NULL)
+          GROUP BY database_id;
+
+  - collector_name: availability
+    metrics:
+      - metric_name: sqlserver_info
+        type: gauge
+        help: "Static SQL Server Information"
+        key_labels:
+          - server_name
+          - edition
+          - product_version
+          - product_level
+        values:
+          - value
+        query: |
+          SELECT
+              @@SERVERNAME AS server_name,
+              SERVERPROPERTY('Edition') AS edition,
+              SERVERPROPERTY('ProductVersion') AS product_version,
+              SERVERPROPERTY('ProductLevel') AS product_level,
+              CAST(1 AS INT) AS value;
+
+  - collector_name: activity
+    metrics:
+      - metric_name: sqlserver_user_connections
+        type: gauge
+        help: "Current number of user connections."
+        values: [value]
+        query: |
+          SELECT COUNT(*) AS value
+          FROM sys.dm_exec_sessions
+          WHERE is_user_process = 1;
+
+      - metric_name: sqlserver_active_requests
+        type: gauge
+        help: "Current number of active requests."
+        values: [value]
+        query: |
+          SELECT COUNT(*) AS value
+          FROM sys.dm_exec_requests;
+
+      - metric_name: sqlserver_blocked_requests
+        type: gauge
+        help: "Current number of blocked requests."
+        values: [value]
+        query: |
+          SELECT COUNT(*) AS value
+          FROM sys.dm_exec_requests
+          WHERE blocking_session_id <> 0;
+
+      - metric_name: sqlserver_open_transactions
+        type: gauge
+        help: "Current number of open transactions."
+        values: [value]
+        query: |
+          SELECT COUNT(DISTINCT session_id) AS value
+          FROM sys.dm_tran_session_transactions;
+
+      - metric_name: sqlserver_batch_requests_total
+        type: counter
+        help: "Total batch requests since startup."
+        values: [value]
+        query: |
+          SELECT cntr_value AS value
+          FROM sys.dm_os_performance_counters
+          WHERE object_name LIKE '%SQL Statistics%'
+            AND counter_name = 'Batch Requests/sec';
+
+      - metric_name: sqlserver_sql_compilations_total
+        type: counter
+        help: "Total SQL compilations since startup."
+        values: [value]
+        query: |
+          SELECT cntr_value AS value
+          FROM sys.dm_os_performance_counters
+          WHERE object_name LIKE '%SQL Statistics%'
+            AND counter_name = 'SQL Compilations/sec';
+
+      - metric_name: sqlserver_sql_recompilations_total
+        type: counter
+        help: "Total SQL recompilations since startup."
+        values: [value]
+        query: |
+          SELECT cntr_value AS value
+          FROM sys.dm_os_performance_counters
+          WHERE object_name LIKE '%SQL Statistics%'
+            AND counter_name = 'SQL Re-Compilations/sec';
+
+      - metric_name: sqlserver_deadlocks_total
+        type: counter
+        help: "Total detected deadlocks since startup."
+        values: [value]
+        query: |
+          SELECT cntr_value AS value
+          FROM sys.dm_os_performance_counters
+          WHERE object_name LIKE '%Locks%'
+            AND counter_name = 'Number of Deadlocks/sec';
+
+  - collector_name: cache
+    metrics:
+      - metric_name: sqlserver_buffer_cache_hit_ratio_percent
+        type: gauge
+        help: "Buffer cache hit ratio percentage."
+        values: [value]
+        query: |
+          SELECT TOP (1)
+              CASE
+                WHEN base.cntr_value = 0 THEN 0
+                ELSE CAST(hit.cntr_value AS float) * 100.0 / base.cntr_value
+              END AS value
+          FROM sys.dm_os_performance_counters hit
+          JOIN sys.dm_os_performance_counters base
+            ON hit.object_name = base.object_name
+          WHERE hit.object_name LIKE '%Buffer Manager%'
+            AND hit.counter_name = 'Buffer cache hit ratio'
+            AND base.counter_name = 'Buffer cache hit ratio base';
+
+      - metric_name: sqlserver_page_life_expectancy_seconds
+        type: gauge
+        help: "Page life expectancy in seconds."
+        values: [value]
+        query: |
+          SELECT cntr_value AS value
+          FROM sys.dm_os_performance_counters
+          WHERE object_name LIKE '%Buffer Manager%'
+            AND counter_name = 'Page life expectancy';
+
+      - metric_name: sqlserver_lazy_writes_total
+        type: counter
+        help: "Total lazy writes since startup."
+        values: [value]
+        query: |
+          SELECT cntr_value AS value
+          FROM sys.dm_os_performance_counters
+          WHERE object_name LIKE '%Buffer Manager%'
+            AND counter_name = 'Lazy writes/sec';
+
+  - collector_name: tempdb
+    metrics:
+      - metric_name: sqlserver_tempdb_total_bytes
+        type: gauge
+        help: "Total allocated tempdb size in bytes."
+        values: [value]
+        query: |
+          SELECT SUM(size) * 8 * 1024 AS value
+          FROM sys.master_files
+          WHERE database_id = 2;
+
+      - metric_name: sqlserver_tempdb_used_bytes
+        type: gauge
+        help: "Currently used tempdb space in bytes."
+        values: [value]
+        query: |
+          USE tempdb;
+          SELECT
+              SUM(
+                  user_object_reserved_page_count +
+                  internal_object_reserved_page_count +
+                  version_store_reserved_page_count +
+                  mixed_extent_page_count
+              ) * 8 * 1024 AS value
+          FROM sys.dm_db_file_space_usage;
+
+      - metric_name: sqlserver_tempdb_version_store_bytes
+        type: gauge
+        help: "Version store usage in bytes."
+        values: [value]
+        query: |
+          USE tempdb;
+          SELECT SUM(version_store_reserved_page_count) * 8 * 1024 AS value
+          FROM sys.dm_db_file_space_usage;
+
+  - collector_name: waits
+    metrics:
+      - metric_name: sqlserver_wait_time_ms_total
+        type: counter
+        help: "Total wait time in milliseconds by wait type."
+        key_labels:
+          - wait_type
+        values:
+          - value
+        query: |
+          SELECT
+              wait_type,
+              wait_time_ms AS value
+          FROM sys.dm_os_wait_stats
+          WHERE wait_time_ms > 0
+            AND wait_type NOT IN (
+              'SLEEP_TASK',
+              'SLEEP_SYSTEMTASK',
+              'LAZYWRITER_SLEEP',
+              'SQLTRACE_BUFFER_FLUSH',
+              'WAITFOR',
+              'LOGMGR_QUEUE',
+              'CHECKPOINT_QUEUE',
+              'REQUEST_FOR_DEADLOCK_SEARCH',
+              'XE_TIMER_EVENT',
+              'XE_DISPATCHER_WAIT',
+              'BROKER_TASK_STOP',
+              'BROKER_TO_FLUSH',
+              'BROKER_EVENTHANDLER',
+              'BROKER_RECEIVE_WAITFOR',
+              'FT_IFTS_SCHEDULER_IDLE_WAIT',
+              'HADR_FILESTREAM_IOMGR_IOCOMPLETION',
+              'DIRTY_PAGE_POLL',
+              'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP',
+              'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP',
+              'SP_SERVER_DIAGNOSTICS_SLEEP'
+            );
+
+      - metric_name: sqlserver_waiting_tasks_total
+        type: counter
+        help: "Total waiting tasks by wait type."
+        key_labels:
+          - wait_type
+        values:
+          - value
+        query: |
+          SELECT
+              wait_type,
+              waiting_tasks_count AS value
+          FROM sys.dm_os_wait_stats
+          WHERE waiting_tasks_count > 0
+            AND wait_type NOT IN (
+              'SLEEP_TASK',
+              'SLEEP_SYSTEMTASK',
+              'LAZYWRITER_SLEEP',
+              'SQLTRACE_BUFFER_FLUSH',
+              'WAITFOR',
+              'LOGMGR_QUEUE',
+              'CHECKPOINT_QUEUE',
+              'REQUEST_FOR_DEADLOCK_SEARCH',
+              'XE_TIMER_EVENT',
+              'XE_DISPATCHER_WAIT',
+              'BROKER_TASK_STOP',
+              'BROKER_TO_FLUSH',
+              'BROKER_EVENTHANDLER',
+              'BROKER_RECEIVE_WAITFOR',
+              'FT_IFTS_SCHEDULER_IDLE_WAIT',
+              'HADR_FILESTREAM_IOMGR_IOCOMPLETION',
+              'DIRTY_PAGE_POLL',
+              'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP',
+              'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP',
+              'SP_SERVER_DIAGNOSTICS_SLEEP'
+            );

@@ -1,0 +1,104 @@
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: sqlserver
+    hostname: C2E3D78FCF17
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD}"
+      MSSQL_PID: "Developer"
+      MSSQL_AGENT_ENABLED: True
+      MSSQL_ENABLE_HADR: True
+
+    restart: unless-stopped
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver_data:/var/opt/mssql
+      - /home/icescream/Projects/Stage/stage/repldata:/var/opt/mssql/repldata
+      - /home/icescream/Projects/Stage/stage/backups:/var/opt/mssql/backups
+      - /home/icescream/Projects/Stage/stage/certs:/var/opt/mssql/certs
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P $$MSSQL_SA_PASSWORD -No -Q 'SELECT 1' || exit 1"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - monitoring
+      - replication
+      - mirroring
+    
+  sql-exporter:
+    environment:
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD}"
+    image: burningalchemist/sql_exporter:latest
+    container_name: sql-exporter
+    restart: unless-stopped
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    command:
+      - "--config.file=/etc/sql_exporter/config.yml"
+    volumes:
+      - ./sql_exporter:/etc/sql_exporter:ro
+    ports:
+      - "9399:9399"
+    networks:
+      - monitoring
+
+  prometheus:
+    image: prom/prometheus:v3.6.0
+    container_name: prometheus
+    restart: unless-stopped
+    depends_on:
+      - sql-exporter
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=60d"
+      - "--storage.tsdb.retention.size=20GB"
+      - "--web.enable-lifecycle"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: "http://localhost:3000"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - monitoring
+    
+volumes:
+  sqlserver_data:
+  prometheus-data:
+  grafana-data:
+  
+networks:
+  monitoring:
+    driver: bridge
+  replication:
+    external: true
+  mirroring:
+    external: true

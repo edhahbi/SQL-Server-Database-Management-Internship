@@ -1,0 +1,38 @@
+services:
+  
+  sqlserver_mirroring:
+    image : mcr.microsoft.com/mssql/server:2022-latest
+    container_name: sqlserver_mirroring
+    hostname: f86abc8870c9
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD}"
+      MSSQL_PID: "Developer"
+      MSSQL_AGENT_ENABLED: True
+      MSSQL_ENABLE_HADR: True
+    restart: unless-stopped
+    ports:
+      - "1435:1433"
+    volumes:
+      - sqlserver_mirroring_data:/var/opt/mssql
+      - /home/icescream/Projects/Stage/stage/certs:/var/opt/mssql/certs
+      - /home/icescream/Projects/Stage/stage/backups:/var/opt/mssql/backups
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P $$MSSQL_SA_PASSWORD -No -Q 'SELECT 1' || exit 1"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - mirroring
+    
+volumes:
+  sqlserver_mirroring_data:
+    
+networks:
+  mirroring:
+    external: true
