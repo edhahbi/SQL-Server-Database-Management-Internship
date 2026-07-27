@@ -1,6 +1,3 @@
--- certificate generation 
-print @@servername;
-
 create master key
     encryption by password = 'ClinisysStage$12';
 
@@ -16,7 +13,7 @@ create certificate PrimaryCert
 create login MirrorLogin
     from certificate PrimaryCert;
 
-create endpoint mirroring
+create endpoint mirroring_endpoint
     state = started
     as tcp (
         listener_port = 5022
@@ -29,46 +26,16 @@ create endpoint mirroring
         );
 go;
 
-grant connect on endpoint::mirroring
+grant connect on endpoint::mirroring_endpoint
     to MirrorLogin;
 
-SET NOCOUNT ON;
+ALTER AVAILABILITY GROUP [AG_Clinisys] JOIN WITH (CLUSTER_TYPE = NONE);
+GO
 
-DECLARE @MirrorPartner NVARCHAR(256) = N'TCP://sqlserver:5022';
-DECLARE @Db SYSNAME;
-DECLARE @Sql NVARCHAR(MAX);
+ALTER AVAILABILITY GROUP [AG_Clinisys] GRANT CREATE ANY DATABASE;
+GO
 
-DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
-    SELECT name
-    FROM sys.databases
-    WHERE database_id > 4
-      AND state_desc = 'RESTORING'
-      AND is_read_only = 0
-      AND name not in ('ArchiveDbRepl');
+SELECT name FROM sys.availability_groups;
 
-OPEN db_cursor;
-FETCH NEXT FROM db_cursor INTO @Db;
 
-WHILE @@FETCH_STATUS = 0
-    BEGIN
-        BEGIN TRY
-            PRINT 'Configuring mirroring for ' + QUOTENAME(@Db);
-
-            SET @Sql = N'ALTER DATABASE ' + QUOTENAME(@Db) + N' SET PARTNER = N''' + @MirrorPartner + N''';';
-            EXEC sp_executesql @Sql;
-
-            SET @Sql = N'ALTER DATABASE ' + QUOTENAME(@Db) + N' SET SAFETY FULL;';
-            EXEC sp_executesql @Sql;
-
-            PRINT 'OK: ' + @Db + ' set to synchronous mirroring.';
-        END TRY
-        BEGIN CATCH
-            PRINT 'ERROR: ' + @Db + ' - ' + ERROR_MESSAGE();
-        END CATCH;
-
-        FETCH NEXT FROM db_cursor INTO @Db;
-    END
-
-CLOSE db_cursor;
-DEALLOCATE db_cursor;
 

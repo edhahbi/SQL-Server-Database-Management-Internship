@@ -233,7 +233,6 @@ exec msdb.dbo.sp_start_job
      @job_name = N'Backup - All User Databases - FULL';
 GO
 -- differential daily backup job 
-
 EXEC dbo.sp_add_job
     @job_name = N'Backup - All User Databases - DIFFERENTIAL';
 GO
@@ -253,6 +252,7 @@ EXEC dbo.sp_add_schedule
     @active_start_time = 020000;
 GO
 
+
 EXEC dbo.sp_attach_schedule
     @job_name = N'Backup - All User Databases - DIFFERENTIAL',
     @schedule_name = N'Daily - 02:00';
@@ -263,7 +263,7 @@ EXEC dbo.sp_add_jobserver
 GO
 
 exec msdb.dbo.sp_start_job
-     @job_name = N'Backup - All User Databases - DIFFIRENTIAL';
+     @job_name = N'Backup - All User Databases - DIFFERENTIAL';
 GO
 -- hourly transactional log backup job
 
